@@ -1,0 +1,1196 @@
+---
+title: ""
+author: ""
+editor: visual
+format:
+
+ pdf:
+   linestretch: 1.5
+   papersize: a4
+   pdf-engine: lualatex
+   mainfont: "Myriad-Pro"
+   documentclass: report
+   geometry:
+      - top=25mm
+      - left=25mm
+      - right=25mm
+      - bottom=25mm
+      - heightrounded
+      
+execute: 
+  warning: false
+header-includes:
+  - \usepackage{setspace}
+  - \usepackage{fontspec}
+  - \usepackage{lscape}
+  - \newcommand{\blandscape}{\begin{landscape}}
+  - \newcommand{\elandscape}{\end{landscape}}
+bibliography: AFi.bib 
+csl: "chicago-fullnote-bibliography-16th-edition.csl"
+cite-method: citeproc
+---
+
+```{r data processing, include=FALSE}
+#--------------------------------------------------#
+#             AFI 2023 (v14)              #
+#--------------------------------------------------#
+
+#### Preliminaries ####
+
+R.version$version.string
+
+# clear workspace
+rm(list=ls())
+
+# install.packages("systemfonts")
+systemfonts::system_fonts()
+
+# load packages
+library(here)
+library(tidyverse)
+library(rworldmap) # maps
+library(magrittr)
+library(reshape2)
+library(ggpubr)
+library(leaflet)
+library(plotly)
+library(gapminder)
+library(countrycode)
+library(knitr)
+library(ggrepel)
+library(ggthemes)
+library(modelsummary)
+library(patchwork)
+library(AFIUpdatePackage)
+
+
+#---------------------------------------------------#
+#--------------------color_palette------------------#
+#---------------------------------------------------#
+
+afi_color_main <- c("#000000", "#666666", "#7685A6", "#002F6C", "#FFB81C", "#E87722", "#920050", "#C56D97")
+afi_color_secondary <- c("#617E45", "#A1B2C9", "#0A5F4B", "#629E93", "#FFD372", "#F4AA77", "#C88264", "#E2B6A5")
+
+afi_color_main_rev <- c("#666666", "#002F6C", "#E87722", "#920050", "#000000","#C56D97", "#7685A6", "#002F6C")
+
+two_afi_color <- c("#E87722", "#920050")
+
+
+#---------------------------------------------------#
+#--------------------load data ---------------------#
+#---------------------------------------------------#
+
+vdem_full_v13 <- readRDS("data/V-Dem-CY-Full+Others-v13.rds")
+
+vdem_full_v14_cy <- readRDS("data/V-Dem-CY-Full+Others-v14.rds")
+
+#--------------------------------------------------#
+#                 Data Preparation                 #
+#--------------------------------------------------#
+
+vdem_subset_v14 <- vdem_full_v14_cy %>%
+  group_by(country_id) %>%
+  fill(e_wb_pop, .direction = "down") %>%
+  filter(year >=1900)
+
+vdem_subset_v14 <- vdem_subset_v14 %>%
+  dplyr::select(country_text_id, country_name, year, country_id, starts_with("v2xca_academ"),
+              starts_with("v2cafres"), starts_with("v2cafexch"), 
+              starts_with("v2cainsaut"), starts_with("v2casurv"), 
+              starts_with("v2clacfree"), v2x_regime, e_wb_pop, e_regionpol_6C)
+
+## Setting vdem data.frame for using the AFIUpdatePackage ##
+vdem <- vdem_subset_v14
+
+##number of coders v14 
+no_coders_v14 <- 2329
+no_coders_v13 <- 2197
+
+number_of_countries <- length(unique(subset(subset(vdem_subset_v14, year==2023), is.na(v2xca_academ)==F)$country_name)) # 177 countries
+
+episodes_data_uncertainty <- readRDS("data/episodes_data_uncertainty.rds")
+
+country_decliners_2000 <- episodes_data_uncertainty %>%  
+  group_by(country_text_id) %>%
+  mutate(lag_v2xca_academ = lag(v2xca_academ)) %>%
+  filter(decline_episode==1) %>%
+  group_by(decline_episode_id) %>%
+  dplyr:: summarize(country_name = first (country_name), 
+                    start_year = first(year), 
+                    end_year = last(year), 
+                    AFI_before = first(lag_v2xca_academ),
+                    AFI_end = last(v2xca_academ), 
+                    decline = AFI_end- AFI_before, 
+                    censored = first(decline_episode_censored)) %>%
+  filter(end_year >=2000) 
+  
+number_country_decliners_2000 <- unique(country_decliners_2000$country_name)
+number_episodes_decliners_2000 <- unique(country_decliners_2000$decline_episode_id)
+
+country_growth_2000 <- episodes_data_uncertainty %>%  
+  group_by(country_text_id) %>%
+  mutate(lag_v2xca_academ = lag(v2xca_academ)) %>%
+  filter(increase_episode==1) %>%
+  group_by(increase_episode_id) %>%
+  dplyr:: summarize(country_name = first (country_name), 
+                    start_year = first(year), 
+                    end_year = last(year), 
+                    AFI_before = first(lag_v2xca_academ),
+                    AFI_end = last(v2xca_academ), 
+                    decline = AFI_end- AFI_before, 
+                    censored = first(increase_episode_censored)) %>%
+  filter(end_year >=2000) 
+  
+number_country_growth_2000 <- unique(country_growth_2000$country_name)
+number_episodes_growth_2000 <- unique(country_growth_2000$increase_episode_id)
+
+stayers_number <- episodes_data_uncertainty %>%
+  filter(year >=2000) %>%
+  filter(!country_name %in% c(number_country_growth_2000, number_country_decliners_2000))
+
+number_countries_stayers <- unique(stayers_number$country_name)
+
+sum_e_wb_pop <- vdem_subset_v14 %>%
+  ungroup() %>%
+  filter(year == 2023) %>%
+  summarize(pop_world_sum = sum(e_wb_pop, na.rm = T))
+sum_e_wb_pop <- as.numeric(sum_e_wb_pop)
+
+population_data_decliners <- vdem_subset_v14 %>%
+  filter(year == 2023) %>%
+  mutate(decliners = ifelse(country_name %in% number_country_decliners_2000, 1, 0)) %>%
+  group_by(decliners) %>%
+  summarize(population_share = sum(e_wb_pop, na.rm = T)/sum_e_wb_pop)
+
+population_data_increasers <- vdem_subset_v14 %>%
+  filter(year == 2023) %>%
+  mutate(increasers = ifelse(country_name %in% number_country_growth_2000, 1, 0)) %>%
+  group_by(increasers) %>%
+  summarize(population_share = sum(e_wb_pop, na.rm = T)/sum_e_wb_pop)
+
+no_data_poins <- 1020000
+
+```
+
+\captionsetup{skip=2pt}
+
+## Introduction
+
+The latest edition of the *Academic Freedom Index* (AFI) provides an overview of the state of academic freedom in `r toString(number_of_countries)` countries in 2023, and trends over time. The AFI assesses *de facto* levels of academic freedom and is a unique and peer-reviewed approach to conceptualizing and assessing academic freedom worldwide.[@spannagel_academic_2023] The aggregate index rests on five indicators, a customized Bayesian measurement model, and more than one million data points at the coder level.[^1] It builds on the expertise of `r toString(scales::label_comma(accuracy = NULL)(no_coders_v14))` scholars around the globe and is freely available at <https://academic-freedom-index.net> and [https://www.v-dem.net](https://www.v-dem.net/data/the-v-dem-dataset/){.url}. The findings presented in this year's update build upon the AFI team's research published in several journals in recent years.[@spannagel_academic_2023; @lott_academic_2023; @pelke_academic_2023; @kinzelbach_global_2021; @luhrmann_third_2019]
+
+[^1]: Curated in version 14 of the V-Dem dataset: @coppedge_vdem_2024
+
+In line with previous AFI reports,[@kinzelbach_academic_2022; @kinzelbach_academic_2023] this year's data demonstrate that academic freedom globally is under threat. Using the concept of growth and decline episodes at the country level,[@lott_academic_2023] the report shows that 23 countries are in episodes of decline in academic freedom, but that academic freedom is increasing in only ten countries. 3.6 billion people now live in countries where academic freedom is completely restricted. Accounting for a longer timeframe by comparing 2023 data with that of 50 years ago, we note more optimistically that academic freedom has expanded in 56 countries. @fig-world_map shows the state of academic freedom in 2023, based on the latest version of the *Academic Freedom Index* (AFI).
+
+```{r world map processing, include=FALSE}
+
+#  Select year and indicators
+year_sub <- 2023
+indicator <- c("v2xca_academ")
+
+# Subset huge V-Dem dataset
+vdem_subset <- vdem_subset_v14 %>% 
+  filter(year == year_sub) %>% 
+  select(country_text_id, country_name, year, all_of(indicator))
+
+# Map V-Dem country IDs
+map <- joinCountryData2Map(vdem_subset,
+                           joinCode = "ISO3",
+                           nameJoinColumn = "country_text_id",
+                           verbose = T)
+
+# Exclude Antarctica
+map <- subset(map, continent != "Antarctica")
+
+# Pick colours (RoW colour scheme, 10-cat)
+cols <- c("#8b3626", "#BB4833", "#D26C59","#DF9688", "#ECC0B8", "#D8D9E9", "#B1B2CD", "#766F95", "#463278", "#1F0561")
+
+```
+
+```{r world map plotting, echo= FALSE, fig.height = 16, fig.width = 30, out.height="115%", fig.pos="h"}
+#| label: fig-world_map
+#| fig-cap: "The State of Academic Freedom in 2023 (0--1, low to high)"
+
+# Map
+mapParams <- mapCountryData(map, nameColumnToPlot = "v2xca_academ",
+                            colourPalette = cols,
+                            catMethod = seq(0, 1, 0.1), addLegend = F,
+                            missingCountryCol = "white",
+                            mapTitle = "")
+
+
+# Legend
+do.call(addMapLegend, c(mapParams, legendLabels = "all", legendMar = 3,
+                        legendWidth = 0.9, legendShrink = 0.875, labelFontSize = 2))
+
+```
+
+```{r map-saving, include=FALSE}
+
+
+OUTDIR  <- "figs"
+
+dir.create(OUTDIR, showWarnings = F, recursive = T)
+
+stopifnot(dir.exists(OUTDIR))
+
+# save output as .png
+png(file="figs/Fig1_AFI_map.png", width = 465, height = 295, units='mm', res = 600)
+# save output as .eps
+#setEPS(width = 465, height = 295, reset = T)
+#postscript(file="figs/Fig1_AFI_map.eps")
+
+par(mar=c(1,1,1,1)) #(bottom, left, top, right)
+
+# Map
+mapParams <- mapCountryData(map, nameColumnToPlot = "v2xca_academ",
+                            colourPalette = cols,
+                            catMethod = seq(0, 1, 0.1), addLegend = F,
+                            missingCountryCol = "white",
+                            mapTitle = "")
+
+
+# Legend
+do.call(addMapLegend, c(mapParams, legendLabels = "all", legendMar = 4,
+                        legendWidth = 0.6, legendShrink = 0.775, labelFontSize = 1.5))
+
+
+#---------------------------------------------------#
+# Close plotting device
+dev.off()
+
+
+```
+
+The 2024 AFI update also explores the challenge of polarization. The data show that polarization correlates with declining academic freedom in many countries, but there are exceptional cases in which academic freedom expands in the face of high polarization. In highly polarized societies, universities can become caught up in the maelstrom of an “us versus them” divide. Yet, it is precisely in such tense, even explosive contexts that universities are particularly important for society. Universities are in a unique position -- and thus also have a responsibility -- to counteract polarization with open discourse, scientifically sound knowledge-production, and education. It is therefore necessary to protect university autonomy. When faced with the specter of polarization, universities and academics also have self-serving reasons to insist on institutional autonomy and scholarly integrity. When anti-pluralist parties come to power, they typically seek to limit academic freedom in line with their political interests. Scholars and higher education decision-makers should therefore prepare to defend institutional autonomy and take measures to promote individual academic freedom, before it becomes difficult to do so.
+
+## Fifty Years and No Progress?
+
+Today's proportion of the world’s population who lack access to academic freedom is comparable to the situation 50 years ago, in 1973. This is illustrated in @fig-population_status_group.
+
+\captionsetup{skip=4pt}
+
+```{r population status group, include = FALSE}
+
+vdem_subset_v14 <- vdem_subset_v14 %>% ungroup()
+
+vdem_subset_v14 <- vdem_subset_v14 %>%
+   mutate(status_group_labels = case_when(v2xca_academ >=0.8 ~ "Fully free", 
+                                         v2xca_academ >=0.6 & v2xca_academ <0.8 ~ "Mostly free", 
+                                         v2xca_academ >=0.4 & v2xca_academ <0.6 ~ "Moderately restricted", 
+                                         v2xca_academ >=0.2 & v2xca_academ <0.4~ "Severely restricted", 
+                                         v2xca_academ < 0.2 ~ "Completely restricted"), 
+         status_group = case_when(v2xca_academ >=0.8 ~ "Status Group A", 
+                                         v2xca_academ >=0.6 & v2xca_academ <0.8 ~"Status Group B", 
+                                         v2xca_academ >=0.4 & v2xca_academ <0.6 ~ "Status Group C", 
+                                         v2xca_academ >=0.2 & v2xca_academ <0.4 ~ "Status Group D", 
+                                         v2xca_academ < 0.2 ~ "Status Group E"))
+
+## 2023 ##
+vdem_2023 <- vdem_subset_v14 %>%
+  dplyr::select(country_name, country_text_id, year, v2xca_academ, v2xca_academ_codehigh, v2xca_academ_codelow, e_wb_pop, status_group_labels, status_group) %>%
+  filter(year ==2023) %>%
+  mutate(e_wb_pop = ifelse(country_name == "Taiwan", 23347374, 
+                           ifelse(country_name == "Palestine/Gaza", 2375259, 
+                                  ifelse(country_name == "Somaliland", 5741086, 
+                                         ifelse(country_name == "Zanzibar", 800010, 
+                                                ifelse(country_name == "Kosovo", 1761864, e_wb_pop)))))) # manually add country population estimates from diverse sources
+summary(vdem_2023)
+
+sum(table(vdem_2023$status_group)) # cross check 179 countries in 2023
+table(vdem_2023$status_group)
+
+pop_2023_estimate <- vdem_2023 %>%
+  ungroup() %>%
+  dplyr::summarize(pop_world_sum = sum(e_wb_pop, na.rm = T)) 
+pop_2023_estimate <- as.numeric(pop_2023_estimate)
+
+vdem_2023 <- vdem_2023 %>%
+  ungroup() %>%
+  group_by(status_group_labels, status_group) %>%
+  dplyr:: summarize(pop_weight = sum(e_wb_pop) / pop_2023_estimate)
+
+vdem_2023$status_group <- factor(vdem_2023$status_group, levels = c("Status Group A", "Status Group B", 
+                                                          "Status Group C", "Status Group D", 
+                                                          "Status Group E"))
+
+
+# Compute a good label
+vdem_2023$label <- paste0(vdem_2023$status_group, ":\n", vdem_2023$status_group_labels)
+
+
+vdem_2023$label <- factor(vdem_2023$label, levels = c("Status Group A:\nFully free", "Status Group B:\nMostly free",                                                       "Status Group C:\nModerately restricted", "Status Group D:\nSeverely restricted", 
+                                                      "Status Group E:\nCompletely restricted"))
+
+vdem_2023 <- vdem_2023 %>%
+  arrange(label)
+
+# Compute the cumulative percentages (top of each rectangle)
+vdem_2023$ymax <- cumsum(vdem_2023$pop_weight)
+
+# Compute the bottom of each rectangle
+vdem_2023$ymin <- c(0, head(vdem_2023$ymax, n=-1))
+
+# Compute label position
+vdem_2023$labelPosition <- (vdem_2023$ymax + vdem_2023$ymin) / 2
+
+## 1973 ##
+
+vdem_1973 <- vdem_subset_v14 %>%
+  dplyr::select(country_name, country_text_id, year, v2xca_academ, v2xca_academ_codehigh, v2xca_academ_codelow, e_wb_pop, status_group_labels, status_group) %>%
+  filter(year ==1973) %>%
+  mutate(e_wb_pop = ifelse(country_name == "Taiwan", 16279000, 
+                           ifelse(country_name == "Palestine/West Bank", 1195000, 
+                                  ifelse(country_name == "German Democratic Republic", 17068000, 
+                                         ifelse(country_name == "Serbia", 20522972, e_wb_pop))))) # manually add country population estimates from diverse sources
+summary(vdem_1973)
+
+na_v2xca_academ <- sum(vdem_1973$e_wb_pop[is.na(vdem_1973$v2xca_academ)], na.rm = T)
+
+pop_1973_estimate <- vdem_1973 %>%
+  ungroup() %>%
+  dplyr::summarize(pop_world_sum = sum(e_wb_pop, na.rm = T)) 
+pop_1973_estimate <- as.numeric(pop_1973_estimate)
+
+na_v2xca_academ/pop_1973_estimate # 0.15% of world population without data for academic freedom index, can be neglected. 
+
+vdem_1973 <- vdem_1973 %>%
+  ungroup() %>%
+  drop_na(status_group) %>%
+  group_by(status_group_labels, status_group) %>%
+  dplyr::summarize(pop_weight = sum(e_wb_pop, na.rm = T) / pop_1973_estimate)
+
+vdem_1973$status_group <- factor(vdem_1973$status_group, levels = c("Status Group A", "Status Group B", 
+                                                                    "Status Group C", "Status Group D", 
+                                                                    "Status Group E"))
+
+
+# Compute a good label
+vdem_1973$label <- paste0(vdem_1973$status_group, ":\n", vdem_1973$status_group_labels)
+
+
+vdem_1973$label <- factor(vdem_1973$label, levels = c("Status Group A:\nFully free", "Status Group B:\nMostly free",                                                       "Status Group C:\nModerately restricted", "Status Group D:\nSeverely restricted", 
+                                                      "Status Group E:\nCompletely restricted"))
+
+vdem_1973 <- vdem_1973 %>%
+  arrange(label)
+
+# Compute the cumulative percentages (top of each rectangle)
+vdem_1973$ymax <- cumsum(vdem_1973$pop_weight)
+
+# Compute the bottom of each rectangle
+vdem_1973$ymin <- c(0, head(vdem_1973$ymax, n=-1))
+
+# Compute label position
+vdem_1973$labelPosition <- (vdem_1973$ymax + vdem_1973$ymin) / 2
+
+sum(vdem_1973$pop_weight)
+
+## 2006 ##
+
+vdem_2006 <- vdem_subset_v14 %>%
+  dplyr::select(country_name, country_text_id, year, v2xca_academ, v2xca_academ_codehigh, v2xca_academ_codelow, e_wb_pop, status_group_labels, status_group) %>%
+  filter(year ==2006) %>%
+   mutate(e_wb_pop = ifelse(country_name == "Taiwan", 22874975, 
+                           ifelse(country_name == "Kosovo", 1719536, 
+                                  ifelse(country_name == "Somaliland", 3500000, 
+                                         ifelse(country_name == "Serbia", 7411569, 
+                                                ifelse(country_name == "Zanzibar", 381576 ,e_wb_pop)))))) # manually add country population estimates from diverse sources
+summary(vdem_2006)
+
+pop_2006_estimate <- vdem_2006 %>%
+  ungroup() %>%
+  dplyr::summarize(pop_world_sum = sum(e_wb_pop, na.rm = T)) 
+pop_2006_estimate <- as.numeric(pop_2006_estimate)
+
+vdem_2006 <- vdem_2006 %>%
+  ungroup() %>%
+  drop_na(status_group) %>%
+  group_by(status_group_labels, status_group) %>%
+  dplyr::summarize(pop_weight = sum(e_wb_pop, na.rm = T) / pop_2006_estimate)
+
+vdem_2006$status_group <- factor(vdem_2006$status_group, levels = c("Status Group A", "Status Group B", 
+                                                                    "Status Group C", "Status Group D", 
+                                                                    "Status Group E"))
+
+
+## Donut Chart ##
+
+# Compute a good label
+vdem_2006$label <- paste0(vdem_2006$status_group, ":\n", vdem_2006$status_group_labels)
+
+
+vdem_2006$label <- factor(vdem_2006$label, levels = c("Status Group A:\nFully free", "Status Group B:\nMostly free",                                                       "Status Group C:\nModerately restricted", "Status Group D:\nSeverely restricted", 
+                                                      "Status Group E:\nCompletely restricted"))
+
+
+vdem_2006 <- vdem_2006 %>%
+  arrange(label)
+
+# Compute the cumulative percentages (top of each rectangle)
+vdem_2006$ymax <- cumsum(vdem_2006$pop_weight)
+
+# Compute the bottom of each rectangle
+vdem_2006$ymin <- c(0, head(vdem_2006$ymax, n=-1))
+
+# Compute label position
+vdem_2006$labelPosition <- (vdem_2006$ymax + vdem_2006$ymin) / 2
+
+
+#### Combine Plots ####
+
+
+
+#1973#
+f2_1973 <- ggplot(vdem_1973, aes(ymax=ymax, ymin=ymin, xmax=4, xmin=2, fill=label)) +
+  geom_rect() +
+  geom_text(x=3, aes(y=labelPosition, label= scales::percent(pop_weight)), color="white", size=10) +
+  scale_fill_manual(values =c('#1F0561',  "#766F95", "#D8D9E9", "#D26C59", '#8b3626'))+
+  scale_color_manual(values =c('#1F0561',  "#766F95", "#D8D9E9", "#D26C59", '#8b3626'))+
+  coord_polar(theta="y") +
+  xlim(c(0, 5)) +
+  theme_void() +
+  labs(title = "1973") +
+  theme(plot.title = element_text(hjust = 0.5, size= 40, face = "bold"), 
+        plot.margin = margin(0, 0, 0, 0, "cm")) +
+  labs(fill = "")
+
+#2023#
+f2_2023 <- ggplot(vdem_2023, aes(ymax=ymax, ymin=ymin, xmax=4, xmin=2, fill=label)) +
+  geom_rect() +
+  geom_text(x=3, aes(y=labelPosition, label= scales::percent(pop_weight)), color="white", size=10) +
+  scale_fill_manual(values =c('#1F0561',  "#766F95", "#D8D9E9", "#D26C59", '#8b3626'))+
+  scale_color_manual(values =c('#1F0561',  "#766F95", "#D8D9E9", "#D26C59", '#8b3626'))+
+  coord_polar(theta="y") +
+  xlim(c(0, 5)) +
+  theme_void() +
+  labs(title = "2023") +
+  theme(plot.title = element_text(hjust = 0.5, size= 40, face = "bold"), 
+         plot.margin = margin(0, 0, 0, 0, "cm")) +
+  labs(fill = "")
+
+#2006#
+f2_2006 <- ggplot(vdem_2006, aes(ymax=ymax, ymin=ymin, xmax=4, xmin=2, fill=label)) +
+  geom_rect() +
+  geom_text(x=3, aes(y=labelPosition, label= scales::percent(pop_weight)), color="white", size=10) +
+  scale_fill_manual(values =c('#1F0561',  "#766F95", "#D8D9E9", "#D26C59", '#8b3626'))+
+  scale_color_manual(values =c('#1F0561',  "#766F95", "#D8D9E9", "#D26C59", '#8b3626'))+
+  coord_polar(theta="y") +
+  xlim(c(0, 5)) +
+  theme_void() +
+  labs(title = "2006") +
+  theme(plot.title = element_text(hjust = 0.5, size= 40, face = "bold"), 
+        plot.margin = margin(0, 0, 0, 0, "cm")) +
+  labs(fill = "")
+
+```
+
+```{r population status group plotting, echo= FALSE, fig.height = 13, fig.width = 30, out.width="100%", fig.pos="h"}
+#| label: fig-population_status_group
+#| fig-cap: "Proportion of Global Population by Status Group in 1973, 2006, and 2023. For this figure, we divided the AFI into five quintiles (status groups A to E). We did not consider the uncertainty intervals when assigning the countries into the status groups. Population data for the countries/territories comes from World Bank's World Development Indicators and have been rounded for presentation purposes."
+
+f2_1973 + f2_2006 + f2_2023 + 
+  plot_layout(ncol = 3, guides='collect') &
+  theme(legend.position='bottom', legend.text = element_text(size=30), legend.spacing.x = unit(1.0, 'cm'), 
+        legend.key.size = unit(2.5, "cm"))
+```
+
+The stark decline since the peak year, 2006, is not only due to losses in academic freedom but also due to population growth, which has been much higher in countries with less freedom. As a result, many more people are affected by restrictions on academic freedom today than 50 years ago. In 1973, only about 1.6 billion people (43.5%) lived in countries with completely restricted academic freedom. Now, 45.5% of the world's population -- 3.6 billion people -- live in 27 countries where academic freedom is completely restricted.[^2] Another 11% live in 26 countries with severely restricted academic freedom, as @fig-population_status_group (see the red portions) illustrates.
+
+[^2]: To build the status group presented in @fig-population_status_group, the AFI was divided into five quintiles (status groups A to E). We did not consider the uncertainty intervals when assigning the countries into the status groups. This leads to a reduction in complexity of the AFI data at the expense of precision, as illustrated in @fig-top_afi_plot_2024 and @fig-bottom_afi_plot_2024.
+
+{{< pagebreak >}}
+
+This is in sharp contrast to 2006, the year for which the *Academic Freedom Index* records an all-time high. At that time, approximately 4 billion people lived in contexts of well-protected academic freedom (fully free and mostly free contexts). Only 17 years later, in 2023, this number has fallen to only 2.8 billion people, as shown in @fig-population_status_group. Of these, 1.1 billion people live in 61 countries that fall into status group A, and 1.7 people live in 41 countries categorized as status group B. @fig-population_status_group provides a general overview of global developments but simplifies the nuanced AFI data. We thus proceed with a country-based perspective that highlights variance in countries’ developments over time.
+
+```{r bubble chart, include = FALSE}
+
+#---------------------------------------------------#
+#-----------------Bubble Charts---------------------#
+#---------------------------------------------------#
+
+vdem_subset <- vdem_subset_v14 %>%
+  ungroup() %>%
+  dplyr::select(country_text_id, country_name, year, v2xca_academ, v2xca_academ_codelow, v2xca_academ_codehigh,  
+                e_regionpol_6C, e_wb_pop) %>%
+  filter(year %in% c(1973, 2023)) %>%
+  mutate(e_regionpol_6C = case_when(e_regionpol_6C ==1 ~ "Eastern Europe\nand Central Asia", 
+                                    e_regionpol_6C ==2 ~ "Latin America\nand the Caribbean", 
+                                    e_regionpol_6C ==3 ~ "The Middle East\nand North Africa", 
+                                    e_regionpol_6C ==4 ~ "Sub-Saharan\nAfrica", 
+                                    e_regionpol_6C ==5 ~ "Western Europe\nand North America", 
+                                    e_regionpol_6C ==6 ~ "Asia and\nthe Pacific"))
+
+vdem_subset_point <- vdem_subset %>%
+  dplyr::select(country_text_id, country_name, year, v2xca_academ,e_regionpol_6C) %>%
+  pivot_wider(names_from = year, values_from = v2xca_academ,  names_prefix = "v2xca_academ_") 
+
+vdem_subset_codelow <- vdem_subset %>%
+  dplyr::select(country_text_id, country_name, year, v2xca_academ_codelow,e_regionpol_6C) %>%
+  pivot_wider(names_from = year, values_from = v2xca_academ_codelow,  names_prefix = "v2xca_academ_codelow") %>%
+  dplyr::select(-c("country_name", "e_regionpol_6C"))
+
+vdem_subset_codehigh <- vdem_subset %>%
+  dplyr::select(country_text_id, country_name, year, v2xca_academ_codehigh,e_regionpol_6C) %>%
+  pivot_wider(names_from = year, values_from = v2xca_academ_codehigh,  names_prefix = "v2xca_academ_codehigh") %>%
+  dplyr::select(-c("country_name", "e_regionpol_6C"))
+
+vdem_subset_2023_pop_est <- vdem_subset %>%
+  filter(year == 2023) %>%
+  dplyr::select(country_text_id, e_wb_pop)
+
+vdem_subset <- vdem_subset_point %>%
+  left_join(vdem_subset_codelow, by = c("country_text_id")) %>%
+  left_join(vdem_subset_codehigh, by = c("country_text_id")) %>%
+  left_join(vdem_subset_2023_pop_est, by = c("country_text_id")) %>%
+  mutate(diff_1973_2023 = 0) %>% 
+  mutate(diff_1973_2023 = ifelse(v2xca_academ_codelow2023 > v2xca_academ_codehigh1973 & v2xca_academ_2023 - v2xca_academ_1973> 0.1, 1, 0), 
+         diff_1973_2023 = ifelse(v2xca_academ_codehigh2023 < v2xca_academ_codelow1973 & v2xca_academ_2023 - v2xca_academ_1973 < -0.1, 1, diff_1973_2023)) %>%
+  mutate(diff_1973_2023_pos_neg = ifelse(v2xca_academ_codelow2023 > v2xca_academ_codehigh1973 & v2xca_academ_2023 - v2xca_academ_1973> 0.1, "positive", 0), 
+         diff_1973_2023_pos_neg = ifelse(v2xca_academ_codehigh2023 < v2xca_academ_codelow1973 & v2xca_academ_2023 - v2xca_academ_1973 < -0.1, "negative", diff_1973_2023_pos_neg))
+
+table(vdem_subset$diff_1973_2023_pos_neg)
+
+vdem_subset <- vdem_subset %>%
+  mutate(e_wb_pop = ifelse(country_name == "Taiwan", 23300000, 
+                           ifelse(country_name == "Palestine/Gaza", 590481, 
+                                  ifelse(country_name == "Somaliland", 5741086, 
+                                         ifelse(country_name == "Zanzibar", 1889773, e_wb_pop))))) %>%
+  mutate(e_wb_pop = e_wb_pop /1000000)
+
+table(vdem_subset$diff_1973_2023)
+summary(vdem_subset$e_wb_pop)
+
+cols <- c("Eastern Europe\nand Central Asia" = "#666666",
+          "Latin America\nand the Caribbean" = "#7685A6", 
+          "The Middle East\nand North Africa" = "#FFB81C", 
+          "Sub-Saharan\nAfrica" = "#002F6C", 
+          "Western Europe\nand North America" = "#E87722", 
+          "Asia and\nthe Pacific" = "#0A5F4B")
+
+number_of_countries_2023_e <- unique(vdem_subset$country_name[vdem_subset$v2xca_academ_2023 < 0.2])# -1 country because of NA
+number_of_countries_1973_e <- unique(vdem_subset$country_name[vdem_subset$v2xca_academ_1973 < 0.2]) # -1 country because of NA
+
+number_of_countries_2023_a <- unique(vdem_subset$country_name[vdem_subset$v2xca_academ_2023 >= 0.8])# -1 country because of NA
+number_of_countries_2023_b <- unique(vdem_subset$country_name[vdem_subset$v2xca_academ_2023 >=0.6 & vdem_subset$v2xca_academ_2023 <0.8])# -1 country because of NA
+
+population_1973_e <-  vdem_subset_v14 %>%
+  filter(year == 1973) %>% 
+  mutate(e_wb_pop = ifelse(country_name == "Taiwan", 16279000, 
+                           ifelse(country_name == "Palestine/West Bank", 1195000, 
+                                  ifelse(country_name == "German Democratic Republic", 17068000, 
+                                         ifelse(country_name == "Serbia", 20522972, e_wb_pop))))) %>%
+  mutate(status_e = ifelse(country_name %in% number_of_countries_1973_e, 1, 0)) %>%
+  group_by(status_e) %>%
+  summarize(e_wb_pop = sum(e_wb_pop, na.rm = T))
+
+population_1973_e$e_wb_pop[population_1973_e$status_e==1] / sum(population_1973_e$e_wb_pop)
+
+population_2023_e <-  vdem_subset_v14 %>%
+  filter(year == 2023) %>%
+  mutate(e_wb_pop = ifelse(country_name == "Taiwan", 23347374, 
+                           ifelse(country_name == "Palestine/Gaza", 2375259, 
+                                  ifelse(country_name == "Somaliland", 5741086, 
+                                         ifelse(country_name == "Zanzibar", 800010, 
+                                                ifelse(country_name == "Kosovo", 1761864, e_wb_pop))))))%>%
+  mutate(status_e = ifelse(country_name %in% number_of_countries_2023_e, 1, 0), 
+         status_a = ifelse(country_name %in% number_of_countries_2023_a, 1, 0), 
+         status_b = ifelse(country_name %in% number_of_countries_2023_b, 1, 0)) %>%
+  group_by(status_e) %>%
+  summarize(e_wb_pop = sum(e_wb_pop, na.rm = T))
+population_2023_e$e_wb_pop[population_2023_e$status_e==1] / sum(population_2023_e$e_wb_pop)
+
+
+population_2023_b <-  vdem_subset_v14 %>%
+  filter(year == 2023) %>%
+  mutate(e_wb_pop = ifelse(country_name == "Taiwan", 23347374, 
+                           ifelse(country_name == "Palestine/Gaza", 2375259, 
+                                  ifelse(country_name == "Somaliland", 5741086, 
+                                         ifelse(country_name == "Zanzibar", 800010, 
+                                                ifelse(country_name == "Kosovo", 1761864, e_wb_pop))))))%>%
+  mutate(status_e = ifelse(country_name %in% number_of_countries_2023_e, 1, 0), 
+         status_a = ifelse(country_name %in% number_of_countries_2023_a, 1, 0), 
+         status_b = ifelse(country_name %in% number_of_countries_2023_b, 1, 0)) %>%
+  group_by(status_b) %>%
+  summarize(e_wb_pop = sum(e_wb_pop, na.rm = T))
+
+
+population_2023_a <-  vdem_subset_v14 %>%
+  filter(year == 2023) %>%
+  mutate(e_wb_pop = ifelse(country_name == "Taiwan", 23347374, 
+                           ifelse(country_name == "Palestine/Gaza", 2375259, 
+                                  ifelse(country_name == "Somaliland", 5741086, 
+                                         ifelse(country_name == "Zanzibar", 800010, 
+                                                ifelse(country_name == "Kosovo", 1761864, e_wb_pop))))))%>%
+  mutate(status_e = ifelse(country_name %in% number_of_countries_2023_e, 1, 0), 
+         status_a = ifelse(country_name %in% number_of_countries_2023_a, 1, 0), 
+         status_b = ifelse(country_name %in% number_of_countries_2023_b, 1, 0)) %>%
+  group_by(status_a) %>%
+  summarize(e_wb_pop = sum(e_wb_pop, na.rm = T))
+
+
+
+
+bubble_chart <- ggplot(vdem_subset, aes(x = v2xca_academ_1973, y =v2xca_academ_2023, color = e_regionpol_6C)) +
+  geom_point(data = subset(vdem_subset, diff_1973_2023 ==1), 
+             aes(size = e_wb_pop), alpha=0.7) +
+  geom_point(data = subset(vdem_subset, diff_1973_2023 ==0), 
+             aes(size = e_wb_pop), alpha=0.1) +
+  scale_size(range = c(2, 40), name="Population (M)") +
+  geom_abline(intercept = 0, slope = 1, linewidth = 0.5)+
+  geom_text_repel(data = subset(vdem_subset, diff_1973_2023 ==1),
+                  aes(x = v2xca_academ_1973,
+                      y = v2xca_academ_2023, 
+                      label = country_name), 
+                  show.legend  = FALSE, 
+                  seed = 123) +
+  theme_pubr() + 
+  scale_color_manual("", values = cols) +
+  scale_x_continuous(breaks=c(0, 0.2,0.4,0.6, 0.8, 1), 
+                     sec.axis = sec_axis(~., breaks=c(0.1, 0.3, 0.5, 0.7, 0.9),
+                     labels = c("Status\nGroup E","Status\nGroup D","Status\nGroup C", "Status\nGroup B", "Status\nGroup A"), name= NULL)) +
+  scale_y_continuous(breaks = c(0, 0.2, 0.4, 0.6, 0.8, 1), 
+                     sec.axis = sec_axis(~., breaks=c(0.1, 0.3, 0.5, 0.7, 0.9),
+                     labels = c("Status\nGroup E","Status\nGroup D","Status\nGroup C", "Status\nGroup B", "Status\nGroup A"), name= NULL)) +
+  guides(size = "none") +
+  labs(y = "Academic Freedom Index 2023",
+       x = "Academic Freedom Index 1973",
+       color = "",
+       size = "",
+       label = "",
+       shape = "",
+       title = "",
+       subtitle = "",
+       caption = "") +
+  theme(panel.grid.major.y = element_line(linetype = "dotted", color = "grey"),
+        panel.grid.major.x = element_line(linetype = "dotted", color = "grey"),
+        axis.text = element_text(size=15), 
+        axis.title = element_text(size = 16),
+        axis.ticks.x.top = element_blank() , 
+        axis.ticks.y.right = element_blank(),
+        legend.position="bottom", 
+        legend.key.size = unit(2, 'cm'), #change legend key size
+        legend.key.height = unit(2, 'cm'), #change legend key height
+        legend.key.width = unit(2, 'cm'), #change legend key width
+        legend.title = element_text(size=16), #change legend title font size
+        legend.text = element_text(size=16)) + #change legend text font size
+  guides(color = guide_legend(override.aes = list(size = 7), nrow = 2)) +
+  coord_cartesian(ylim = c(0, 1), xlim = c(0,1), expand = T, clip = "off")
+
+
+```
+
+```{r figure bubble charts, echo=FALSE, warning = FALSE, fig.height = 10, fig.width = 10, fig.align = "center", out.width="95%", fig.pos="h"}
+#| label: fig-bubble_chart
+#| fig-cap: "Increasing and Decreasing Scores on the Academic Freedom Index, 1973--2023. Academic freedom increased in countries above the diagonal line and decreased in countries or territories below it. Countries are labelled if the difference between 1973 and 2023 was statistically significant and substantially meaningful. The size of the points indicates the population size of the countries/territories in 2022 (data from World Bank's World Development Indicators)."
+bubble_chart
+```
+
+@fig-bubble_chart shows countries with substantial and statistically significant declines and improvements in academic freedom over the past 50 years. Dots are proportionate in size to country populations to indicate how many people are affected in the respective countries.[^3] Fifty-six countries have statistically significant higher levels of *de facto* academic freedom in 2023 than in 1973. This represents a remarkable advance for the world seen from the country-perspective, in stark contrast to the population-perspective above that paints a much darker picture.
+
+[^3]: Using a simplified metric comparing 50 intervals and controlling for overlapping uncertainty intervals, and 2022 population data from the World Bank's World Development Indicators.
+
+In the same timeframe, academic freedom substantially worsened in ten countries, some of which are home to large populations like Bangladesh, India, Türkiye, and the United States of America. The dots in lighter colors depict the remaining 73 countries where academic freedom levels have not changed in a substantially meaningful and statistically significant way.[^4] This group includes countries as diverse as China, Ethiopia, and Switzerland.
+
+[^4]: @fig-bubble_chart plots the development for 139 countries for which data is available for 1973 and 2023. For 43 countries, either for 1973 or 2023, no data is available, because (1) the country dissolved, (2) no university was present in 1973, or (3) no AFI data was available for 1973.
+
+In summary, @fig-population_status_group and @fig-bubble_chart present different perspectives that may at first glance appear contradictory. Yet, these two perspectives are both valid. They complement each other by highlighting, respectively, how many people and countries are impacted. To compare both figures, it is helpful to focus on the number of countries within the same status group, and how these numbers change over time. The five status groups A--E represent quintiles on the AFI, ranging from the status *fully free* (A) to the status *completely restricted* (E). In Figure 3, the X-axis depicts academic freedom in 1973, while the Y-axis depicts academic freedom in 2023. While in 1973, status group E included 51 countries, in which academic freedom was completely restricted, that same category in 2023 only includes 27 countries. However, these 27 countries are particularly populous, such as China, India, and Bangladesh, accounting for a total of 45.5% of the world's population.
+
+## Episodes of Growth and Decline in Academic Freedom
+
+Here we focus on analyzing episodes in countries with declining or growing academic freedom in consecutive years. @fig-averages_plot shows the overall development of academic freedom since 1973, based on country-averages (on the left) as well as averages weighted by population size (on the right). The population-weighted perspective provides a strict egalitarian perspective on academic freedom, since academic freedom concerns people's right and opportunity to freely pursue science. The country-averages highlight government performance. This is an equally important perspective because governments have a duty to protect academic freedom.
+
+\captionsetup{skip=4pt}
+
+```{r figure averages, include = FALSE}
+
+f1 <- AFIUpdatePackage::time_series_averages(year_min = 1973, year_max = 2023) + 
+  labs( caption = "")
+
+f2 <- AFIUpdatePackage::time_series_averages_pop_weighted(year_min = 1973, year_max = 2023, pop_measure = "e_wb_pop") +
+  labs(caption = "")
+
+# extract legend from plot1
+legend <- get_legend(
+  f1 +    theme(legend.position = "bottom")
+)
+
+
+```
+
+```{r, figure avergaes, echo=FALSE, warning = FALSE, fig.height = 7, fig.width = 10, fig.align = "center", out.width="100%", fig.pos="h"}
+#| label: fig-averages_plot
+#| fig-cap: "AFI, Global and Regional Averages, 1960--2023 (right-hand side: population-weighted). Population data from the World Development Indicators."
+
+cowplot::plot_grid(cowplot::plot_grid(f1 +  theme(legend.position = "none"),f2 +  theme(legend.position = "none"), ncol = 2, align = "h"),
+                   legend,
+                   ncol=1,
+                   align = "h",
+                   rel_heights = c(1.1,0.1))
+```
+
+\captionsetup{skip=2pt}
+
+The thick pink line represents the most likely global average value of the *Academic Freedom Index*, with the uncertainty interval shaded in light pink. @fig-averages_plot shows that academic freedom began declining globally around 2012, but that the decline remains within the uncertainty interval if we consider country-based averages alone. When weighted by population size, the worldwide decline in academic freedom is notably more pronounced. {{< pagebreak >}}
+
+```{r world_map_afi_episodes, include = FALSE}
+vdem_subset_episodes <- episodes_data_uncertainty %>%
+  filter(year == 2023) %>%
+  select(country_text_id, year, decline_episode, increase_episode) %>%
+  mutate(episode = ifelse(decline_episode ==1, "Decline Episode", 
+                          ifelse(increase_episode ==1, "Growth Episode", NA))) 
+table(vdem_subset_episodes$episode)
+
+
+  # Map V-Dem country IDs
+  map <- joinCountryData2Map(vdem_subset_episodes,
+                             joinCode = "ISO3",
+                             nameJoinColumn = "country_text_id",
+                             verbose = T)
+
+  # Exclude Antarctica
+  map <- subset(map, continent != "Antarctica")
+
+  # Pick colours (RoW colour scheme, 2-cat)
+  cols <- c("#8b3626", "#1F0561")
+
+```
+
+The world map in @fig-world_map_afi_episodes shows which countries were in episodes of growth (blue) or decline (red) in academic freedom in 2023, using a metric proposed by Lott in *Higher Education*.[@lott_academic_2023] By using this rigorous, more granular method, we can detect the start and end dates of episodes, while also paying attention to the statistical uncertainty attached to AFI scores.[^5]
+
+[^5]: In the following analysis, we use the episodes of academic freedom decline and growth dataset, controlling for overlapping uncertainty intervals as proposed by Lott [-@lott_academic_2023] and updated with V-Dem version 14 data. The respective R package can be downloaded at <https://github.com/larslott/EpisodeR>. A decline episode in academic freedom is defined as a cumulative drop of 0.1 or more on the *Academic Freedom Index* and non-overlapping uncertainty intervals before the start of an episode and at the end of an episode. The episode approach is granular and is not based on a predetermined comparison of two years, which may be arbitrary. Detailed parameters that define academic freedom decline and growth episodes can be found in Lott [-@lott_academic_2023].
+
+In 2023, ten countries were in an academic freedom growth episode. This indicates a slightly positive trend compared to 2019, when only four countries were in a growth episode. Simultaneously, 23 countries are in episodes of declining academic freedom, just under the record number of 26 declining countries registered in 2021. We interpret this finding optimistically, as another indication of a somewhat better global situation.
+
+@fig-episode_plot details these patterns of decline and growth episodes. It shows how the number of countries with growth episodes (dashed blue lines) increased from the 1980s and peaked at 44 in 1990. A noticeable decline started shortly after, but the number of countries in growth episodes began to rise again in 2019.
+
+```{r world map plotting, echo= FALSE, fig.height = 16, fig.width = 30, out.height="115%", fig.pos="h"}
+#| label: fig-world_map_afi_episodes
+#| fig-cap: "Countries in Growth and Decline Episodes, 2023. Countries in blue indicate growth episodes in academic freedom; countries in red indicate decline episodes in academic freedom."
+
+# Map
+mapParams <- mapCountryData(map, nameColumnToPlot = "episode",
+                              colourPalette = cols, addLegend = F,
+                              missingCountryCol = "grey90",
+                              mapTitle = "")
+
+```
+
+Coinciding with the so-called third wave of democratization in the 1980s and 1990s, a wave of academic freedom growth emerged in the late 1980s and early 1990s (dotted blue line in @fig-episode_plot), resulting in the greatest improvement in academic freedom yet recorded. The solid red line in @fig-episode_plot shows that the number of countries with declining academic freedom was zero in both 1991 and 1992. In 2000, this increased to three countries, before reaching an all-time high in 2021 with 26 counties in episodes of decline. @fig-episode_plot reveals that the trend of declining academic freedom in an increasing number of countries was manifest and substantial, providing further visual evidence for the trend presented in @fig-averages_plot. Yet it also gives reason for hope that declines may be overcome.
+
+```{r, include = FALSE}
+
+df_year <- episodes_data_uncertainty %>%
+      dplyr::filter(between(year, 1900, 2023)) %>%
+      {if(nrow(.) == 0) stop("No episodes during selected time period. No plot generated") else .} %>%
+      dplyr::group_by(year) %>%
+      dplyr::summarise(increase_episodes = sum(increase_episode, na.rm=TRUE ),
+                       decline_episodes = sum(decline_episode,  na.rm=TRUE)) %>%
+      tidyr::pivot_longer(cols = c(increase_episodes, decline_episodes), names_to = "ep_type", values_to = "countries") %>% filter (year >=1960)
+
+p3 <- ggplot2::ggplot(data = df_year, aes(x = year, y = countries, group = ep_type, linetype = ep_type,
+                                          color = ep_type)) +
+    geom_line() +
+    scale_x_continuous(breaks = seq(round(1900/ 10) * 10, round(2023 / 10) * 10, 10)) +
+    scale_linetype(name = "", breaks = c("increase_episodes", "decline_episodes"), labels = c("Countries with Growth Episodes", "Countries with Decline Episodes")) +
+   labs(y = "Number of Countries",
+       color = "", x = "Year",
+       size = "",
+       fill = "",
+       shape = "",
+       title = "",
+       subtitle = "",
+       caption = "") +
+    theme_pubr() + 
+    theme(legend.position = "bottom") +
+    scale_color_manual(values=c('#1F0561', '#8b3626'), breaks = c("increase_episodes", "decline_episodes"), labels = c("Countries with Growth Episodes", "Countries with Decline Episodes")) +
+   annotate(
+    'text',
+    x = 2021,
+    y = 27,
+    label = '26',
+    fontface = 'bold', 
+    color = "#8b3626",
+    size = 3) +
+   annotate(
+    'text',
+    x = 1991.5,
+    y = 1,
+    label = '0',
+    fontface = 'bold', 
+    color = "#8b3626",
+    size = 3) +
+  annotate(
+    'text',
+    x = 1990,
+    y = 45,
+    label = '44',
+    fontface = 'bold', 
+    color = "#1F0561",
+    size = 3) +
+  annotate(
+    'text',
+    x = 2023,
+    y = 11,
+    label = '10',
+    fontface = 'bold', 
+    color = "#1F0561",
+    size = 3) 
+  
+    
+
+vdem_subset_sum <- episodes_data_uncertainty %>%
+  group_by(year) %>%
+  summarize(number_of_decliners = sum(decline_episode, na.rm = T), 
+            number_of_increasers = sum(increase_episode, na.rm = T)) %>%
+  pivot_longer(!year, names_to = "type_country_nr", values_to = "count")
+
+vdem_subset_waves <- vdem_subset_sum %>%
+  pivot_wider(id_cols = year, names_from = type_country_nr, values_from = count) %>%
+  dplyr::mutate(net_change = number_of_increasers - number_of_decliners, 
+                roll_change = zoo::rollmean(net_change, 5, align = "center", na.pad = TRUE))
+
+p4 <- ggplot(vdem_subset_waves, aes(x = year, y= net_change)) +
+  geom_bar(stat="identity", position="stack", width = 0.7) +
+  geom_line(aes(y = roll_change), color = "#920050", size = 1.05) +
+  theme_pubr() + 
+  scale_x_continuous(breaks = seq(round(min(vdem_subset_sum$year) / 10) * 10, round(max(vdem_subset_sum$year) / 10) * 10, 10)) +
+  labs(y = "Number of Growth Episodes -\nNumber of Decline Episodes",
+       color = "", x = "Year",
+       size = "",
+       fill = "",
+       shape = "",
+       title = "",
+       subtitle = "",
+       caption = "") +
+  theme(axis.title=element_text(size=11))
+```
+
+```{r echo=FALSE, warning = FALSE, fig.height = 6, fig.width = 8, fig.align = "center", out.width="90%", fig.pos="H"}
+#| label: fig-episode_plot
+#| fig-cap: "AFI, Growth and Decline Episodes of Academic Freedom from 1900 to 2023"
+p3
+```
+
+\clearpage
+
+## Polarization and Academic Freedom
+
+There can be many factors behind episodes of growth and decline in academic freedom. We focus here on one of the most plausible explanations for decline in the current context: political and social polarization. Societal polarization means the division of society into "Us" versus "Them" camps.[^6] Political polarization means the division of the political sphere into antagonistic political camps.[^7]
+
+[^6]: The "Polarization of Society" indicator, sourced from the Digital Society project within the V-Dem project, quantifies differences in opinions on major political issues in a society.
+
+[^7]: The "Political Polarization" indicator, sourced from the Civil and Academic Space survey within the V-Dem project, assesses whether a society is polarized into antagonistic political camps.
+
+An increasing body of literature demonstrates that the last 20 years of democratic backsliding is primarily driven by anti-pluralist, nationalist parties. Both their coming to power and subsequent autocratization are strongly associated with increasingly toxic levels of polarization. These parties typically reign in university autonomy unless effectively prevented by the domestic legal framework.[@medzihorsky_walking_2023; @wiebrecht_state_2023; @luhrmann_third_2019]
+
+Societal polarization may also lead to a climate of fear that discourages scientists from asking controversial research questions or sharing their findings with policymakers and the public. Toxic levels of political and societal polarization may affect autonomous research institutions and individual researchers' freedom to research and teach, notably when a scientific topic becomes politically and socially salient, such as climate change, pandemics, gender studies, or migration research.
+
+```{r, include= FALSE}
+
+vdem_subset_polarization <- vdem_full_v14_cy %>%
+  dplyr::select(country_text_id, year, v2cacamps, v2cacamps_osp, v2smpolsoc,v2smpolsoc_osp) 
+
+vdem_subset_episodes <- episodes_data_uncertainty %>%
+  dplyr::select(country_text_id, year, increase_episode, increase_episode_id, increase_episode_start_year,
+                increase_episode_end_year, decline_episode, decline_episode_id, decline_episode_start_year,                 decline_episode_end_year) 
+  
+vdem_subset_polarization <- vdem_subset_polarization %>%
+  left_join(vdem_subset_episodes, by = c("country_text_id", "year")) %>%
+  ungroup() %>%
+  mutate(v2smpolsoc_osp_rev = scales::rescale(v2smpolsoc_osp, to = c(4,0))) %>%
+  dplyr::select(country_text_id, year, v2smpolsoc_osp, v2smpolsoc_osp_rev, everything())
+
+vdem_subset_polarization_decline <- vdem_subset_polarization %>%
+  group_by(country_text_id) %>%
+  mutate(v2smpolsoc_osp_rollmean = zoo::rollmean(v2smpolsoc_osp_rev, k = 3, align = "center", na.pad = TRUE), 
+         v2cacamps_osp_rollmean = zoo::rollmean(v2cacamps_osp, k = 3, align = "center", na.pad = TRUE)) %>%
+  group_by(decline_episode_id) %>%
+  summarize(v2smpolsoc_osp = first(v2smpolsoc_osp_rollmean), 
+            v2cacamps_osp = first(v2cacamps_osp_rollmean)) %>%
+  drop_na(decline_episode_id) %>%
+  mutate(country_text_id = unlist(map(str_split(decline_episode_id, "_"), 1)), 
+         start_year = as.numeric(unlist(map(str_split(decline_episode_id, "_"), 2))), 
+         end_year = as.numeric(unlist(map(str_split(decline_episode_id, "_"), 3)))) %>%
+  dplyr::select(-decline_episode_id) %>%
+  mutate(episode = "Decline Episodes")
+
+vdem_subset_polarization_increase <- vdem_subset_polarization %>%
+  group_by(country_text_id) %>%
+  mutate(v2smpolsoc_osp_rollmean = zoo::rollmean(v2smpolsoc_osp_rev, k = 3, align = "center",  na.pad = TRUE), 
+         v2cacamps_osp_rollmean = zoo::rollmean(v2cacamps_osp, k = 3, align = "center",  na.pad = TRUE))%>%
+  group_by(increase_episode_id) %>%
+  summarize(v2smpolsoc_osp = first(v2smpolsoc_osp_rollmean), 
+            v2cacamps_osp = first(v2cacamps_osp_rollmean)) %>%
+  drop_na(increase_episode_id) %>%
+  mutate(country_text_id = unlist(map(str_split(increase_episode_id, "_"), 1)), 
+         start_year = as.numeric(unlist(map(str_split(increase_episode_id, "_"), 2))), 
+         end_year = as.numeric(unlist(map(str_split(increase_episode_id, "_"), 3)))) %>%
+  dplyr::select(-increase_episode_id) %>%
+  mutate(episode = "Growth Episodes")
+
+
+vdem_subset_fig_pol <- rbind(vdem_subset_polarization_decline, vdem_subset_polarization_increase)
+
+vdem_subset_fig_pol <- vdem_subset_fig_pol %>%
+  mutate(country_name = ifelse(country_text_id == "ARE", "United Arab Emirates", 
+                               ifelse(country_text_id == "CHN", "China", 
+                                       ifelse(country_text_id == "LTU", "Lithuania", 
+                                               ifelse(country_text_id == "THA", "Thailand", 
+                                                       ifelse(country_text_id == "MKD", "North Macedonia", 
+                                                               ifelse(country_text_id == "BRA", "Brazil", 
+                                                                       ifelse(country_text_id == "MNE", "Montenegro",""))))))))
+
+fig_pol_pol <- ggplot(vdem_subset_fig_pol, aes(x = episode, y = v2cacamps_osp, color = episode)) +
+  geom_boxplot(width=0.3) +
+  geom_jitter() +
+  ggrepel::geom_text_repel(aes(label = ifelse(v2cacamps_osp < 1, country_text_id, "")), position = position_jitter(seed = 1)) +
+
+  labs(y = "Political Polarization before Episode",
+       color = "", x = "",
+       size = "",
+       fill = "",
+       shape = "",
+       title = "Political Polarization",
+       subtitle = "",
+       caption = "") +
+    theme_pubr() + 
+    theme(legend.position = "none", plot.title = element_text(hjust = 0.5)) +
+    scale_color_manual(values=c('#8b3626', '#1F0561')) +
+    scale_y_continuous(breaks=c(0, 1, 2, 3, 4), labels = c("No\npolarization","", "Medium\npolarization", "", "Serious\npolarization"), limits=c(0, 4)) +
+  theme(axis.text.y = element_text(size=9))
+
+fig_soc_pol <- ggplot(subset(vdem_subset_fig_pol, start_year >=2000) , aes(x = episode, y = v2smpolsoc_osp, color = episode, label = country_text_id)) +
+  geom_boxplot(width=0.3, outlier.shape=NA) +
+  geom_jitter(position = position_jitter(seed = 1)) +
+  ggrepel::geom_text_repel(aes(label = ifelse(v2smpolsoc_osp < 1.5 & episode == "Decline Episodes" , country_name, "")), position = position_jitter(seed = 1)) +
+  ggrepel::geom_text_repel(aes(label = ifelse(v2smpolsoc_osp >3.8 & episode == "Growth Episodes" , country_name, "")), position = position_jitter(seed = 1)) +
+  labs(y = "Societal Polarization\nThree-year average around episode onset",
+       color = "", x = "",
+       size = "",
+       fill = "",
+       shape = "",
+       title = "Societal Polarization",
+       subtitle = "",
+       caption = "") +
+    theme_pubr() + 
+    theme(legend.position = "none", plot.title = element_text(hjust = 0.5)) +
+    scale_color_manual(values=c('#8b3626', '#1F0561')) +
+   scale_y_continuous(breaks=c(0, 1, 2, 3, 4), labels = c("No\npolarization","", "Medium\npolarization", "", "Serious\npolarization"), limits=c(0, 4)) +  theme(axis.text.y = element_text(size=9)) +
+   theme(plot.margin = margin(6,6,2,6, "pt"))
+
+
+```
+
+```{r polarization of society, echo= FALSE, fig.height = 6, fig.width = 6, out.width="95%", fig.pos="h"}
+#| label: fig-polarization_afi
+#| fig-cap: "Polarization of Society around the Onset of Academic Freedom Decline and Growth Episodes Since 2000 (0--4, low to high). The Polarization of Society Indicator is reversed for presentation purposes."
+fig_soc_pol
+```
+
+@fig-polarization_afi illustrates that academic freedom faces significant risk in countries with pronounced societal polarization. However, the correlation is far from straight-forward and important outliers such as China, the United Arab Emirates, and Lithuania highlight that declines in academic freedom can also be caused by other political and societal developments.
+
+In a few cases, academic freedom expanded even in the presence of serious-to-moderate levels of societal polarization, as indicated in @fig-polarization_afi. In Thailand and Macedonia, serious polarization occurred around the onset of a growth episode in academic freedom. Conversely, countries like Rwanda, Kazakhstan, and Tunisia indicate that moderate-to-limited polarization may hinder but not necessarily prevent the onset of an academic freedom growth episode.
+
+This suggests that polarization is not associated with declines in academic freedom under all circumstances. Factors like the legal framework, but also universities’ and academics’ own agency, likely play a role in mitigating the pressures of polarization on free science and higher education. In conclusion, societal polarization is one of many factors that may increase the likelihood of declines in academic freedom, but universities, academics, and higher education decision-makers can take action to prevent declines in academic freedom in the context of polarization.
+
+```{r, include = FALSE}
+
+countries_decline <- episodes_data_uncertainty %>%
+  group_by(decline_episode_id) %>%
+  summarize(decline_sum = first(decline_sum)) %>%
+  drop_na(decline_episode_id) %>%
+  mutate(country_text_id = unlist(map(str_split(decline_episode_id, "_"), 1)), 
+         start_year = as.numeric(unlist(map(str_split(decline_episode_id, "_"), 2))), 
+         end_year = as.numeric(unlist(map(str_split(decline_episode_id, "_"), 3)))) %>%
+  filter(end_year== 2023) %>%
+  arrange(decline_sum)
+
+countries_decline <- countries_decline$country_text_id[1:6]  
+
+variables <- c("v2xca_academ_4", "v2cacamps_osp", "v2smpolsoc_osp_rev")
+
+vdem_full_v14_cy <- vdem_full_v14_cy %>%
+  ungroup() %>%
+  mutate(v2smpolsoc_osp_rev = scales::rescale(v2smpolsoc_osp, to = c(4,0)), 
+         v2xca_academ_4 = v2xca_academ * 4)
+  
+vdem_fig_data <- vdem_full_v14_cy %>%
+    ungroup() %>%
+    dplyr::select(country_name, country_text_id, year, all_of(variables))%>%
+    filter(country_text_id %in% countries_decline & year >=2000) %>%
+    pivot_longer(!c(year, country_text_id, country_name), names_to = "var", values_to = "var_num") %>%
+    mutate(var = case_when(var == "v2xca_academ_4" ~ "Academic Freedom Index",
+                           var == "v2cacamps_osp" ~ "Political Polarization",
+                           var == "v2smpolsoc_osp_rev" ~ "Polarization of Society"))
+           
+f1 <- ggplot(vdem_fig_data, aes(x =year, y = var_num, color = var, group = var)) +
+             geom_line(size =1.05, aes(linetype = var)) +
+             facet_wrap(~country_name) +
+             theme_pubclean() +
+             scale_colour_manual(values = c("black","#E87722", "#920050")) +
+             scale_y_continuous(name = "Polarization Indicator", limits = c(0,4),
+                                sec.axis = sec_axis(trans=~.*0.25, name="Academic Freedom Index")) +
+             scale_x_continuous(breaks = seq(2000, 2023, 5)) +
+             labs(y = "",
+                  color = "", x = "",
+                  size = "",
+                  fill = "",
+                  linetype = "",
+                  shape = "",
+                  title = "",
+                  subtitle = "",
+                  caption = "")
+
+```
+
+```{r polarization examples, echo= FALSE, fig.height = 8, fig.width = 13, out.width="85%", fig.pos="h"}
+#| label: fig-polarization_example
+#| fig-cap: "Polarization in Top-Six Countries and Territories with Declines in Academic Freedom, 2000--2023. The left-hand Y-axis indicates the score for the polarization indicators; higher scores for these indicators indicate high levels of polarization. The Polarization of Society Indicator is reversed for presentation purposes. The right-hand Y-axis represents the AFI scale (0--1)."
+f1
+```
+
+@fig-polarization_example illustrates the top six countries and territories experiencing an ongoing episode of decline in academic freedom in 2023. In each case, the rise in polarization is followed by a downturn in the *Academic Freedom Index*. For instance, political polarization and the polarization of society in Hungary started rising in 2005 and reached toxic levels in 2010 following Prime Minister Orbán's electoral victory. After he took office, Hungary's AFI score dramatically declined to enter the bottom 20--30% of all countries assessed by the AFI. Similarly, in India, political and societal polarization remained at moderate levels until 2013. The decline in academic freedom then coincided with a sharp increase in toxic polarization under Prime Minister Modi's administration.
+
+Across all five cases depicted in @fig-polarization_example, it is visually evident that polarization and academic freedom declines go hand in hand, yet this correlation is no more than an initial empirical hint and certainly no proof of causation. Research on the connection between polarization and restrictions of academic freedom is still in its infancy,[For example, @lerch_social_2024, Table A1; @rekker_nature_2021] but promises to be an important field of research that will provide universities, scholars, and higher education decision-makers with much needed orientation.
+
+## Country Overview
+
+Measuring a latent phenomenon like academic freedom is a challenging endeavor. The AFI data meets high academic standards[@pelke_quality_2023] and uses the best available model for aggregating expert assessments [@pemstein_vdem_2024].
+
+```{r, include = FALSE}
+top_AFI <- country_ranking_2024(year_start = 2013, year_end = 2023) 
+bottom_AFI <- country_ranking_2024(year_start = 2013, year_end = 2023, top = F)
+
+```
+
+@fig-top_afi_plot_2024 and @fig-bottom_afi_plot_2024 below present the point estimates and uncertainty intervals for all assessed countries at year-end 2023. They display every country's academic freedom in order of the most likely point estimate, as well as the change over the last ten years if the difference between 2023 and 2013 is statistically significant. We recommend that users consider the reported **uncertainty intervals** when making comparisons over time or between countries. Therefore, the two plots should not be interpreted as rankings. Rather, the plots should be read such that whenever the uncertainty intervals of two countries overlap, no definitive statement can be made about which country has greater academic freedom.
+
+For easy and rough orientation, readers may also refer to the index quintiles, or status groups A--E, which are shaded in different colors in @fig-top_afi_plot_2024 and @fig-bottom_afi_plot_2024. Whenever the uncertainty intervals of countries overlap with the shaded colors representing a status group (see the X-axis), no definitive statement can be made about the status group of that particular country. For example, Lithuania is categorized in status group A, yet its uncertainty interval overlaps with status group B. This suggests it is likely that Lithuania belongs with status group A, while statistical uncertainty implies that it is also possible it belongs with status group B. In @fig-top_afi_plot_2024 and @fig-bottom_afi_plot_2024, countries highlighted in blue represent the six aforementioned cases of significant improvement in academic freedom. The 26 countries in red have undergone significant and substantial declines in academic freedom in the last decade.
+
+```{r top_afi_plot_2024,fig.width=7,fig.height=14, fig.align = "center", out.height="90%", echo=FALSE, fig.pos="H"}
+#| label: fig-top_afi_plot_2024
+#| fig-cap: "Countries by Score, Academic Freedom Index, 2013 Compared to 2023. Notes: Red country names indicate cases of substantial, statistically significant decreasing cases of academic freedom over the past ten years. Blue country names indicate cases of substantial, statistically significant increasing cases of academic freedom. Horizontal lines indicate the uncertainty intervals around the point estimates drawn from the V-Dem Bayesian IRT method. Status groups represent the quintiles of the AFI. Countries for which the uncertainty intervals go beyond the limits of a status group cannot be clearly assigned to one status group."
+#| 
+top_AFI
+```
+
+```{r bottom_afi_plot_2024,fig.width=7,fig.height=14, fig.align = "center", out.height="90%", echo=FALSE, fig.pos="H"}
+#| label: fig-bottom_afi_plot_2024
+#| fig-cap: "Countries by Score, Academic Freedom Index, 2013 Compared to 2023. Notes: Red country names indicate cases of substantial, statistically significant decreasing cases of academic freedom over the past ten years. Blue country names indicate cases of substantial, statistically significant increasing cases of academic freedom. Horizontal lines indicate the uncertainty intervals around the point estimates drawn from the V-Dem Bayesian IRT method. Status groups represent the quintiles of the AFI. Countries for which the uncertainty intervals go beyond the limits of a status group cannot be clearly assigned to one status group."
+#| 
+bottom_AFI
+```
+
+## Background: Assessing Academic Freedom
+
+```{r, include = FALSE}
+overall_number_countries <- length(unique(subset(subset(vdem_subset_v14), is.na(v2xca_academ)==F)$country_name)) # 180 countries
+
+```
+
+In this update, we present the fifth iteration of *Academic Freedom Index* data from V-Dem's version 14 release, drawing on assessments made by `r toString(scales::label_comma(accuracy = NULL)(no_coders_v14))` country experts from around the world.
+
+The data cover the period from `r toString(min(vdem$year, na.rm = T))` to `r toString(max(vdem$year, na.rm = T))`. All data are publicly available and include a total of more than one million data points at the coder level, five indicators, and an aggregate index on academic freedom based on a Bayesian measurement model [@pemstein_vdem_2024]. The index defines a range of components "often considered essential to the *de facto* realization of academic freedom based on a review of the literature and in-depth discussions with policymakers, academics and advocates in the higher education field" [@spannagel_academic_2023, 3973]. The *Academic Freedom Index* rests on five key indicators: the freedom to research and teach; the freedom of academic exchange and dissemination; the institutional autonomy of universities; campus integrity;[^8] and the freedom of academic and cultural expression. Through these five indicators, the AFI captures elements of academic freedom "that are (a) comparable across different university systems around the world and (b) specific to the academic sector" [@spannagel_academic_2023, 3974].
+
+[^8]: The absence of security infringements and surveillance on campus, including online learning platforms.
+
+Users of our data can benefit from the open data approach adopted by the V-Dem project, which also allows for the disaggregation of the AFI. Furthermore, we provide comparative data on additional aspects of academic freedom, notably factual country-year information on constitutional guarantees and commitments to academic freedom under international human rights law [see also @spannagel_introducing_2023].
+
+### What is the Difference between Versions 13 and 14?
+
+V-Dem uses customized Bayesian IRT models to aggregate expert data to indicators and index values [@pemstein_vdem_2024]. Each year, a new calculation takes all available data into account and optimizes comparability between years and countries. However, comparing absolute values of indicators or the index values between different versions of the dataset can be misleading because (1) experts add data with every annual update; (2) experts may update and change their own previous ratings to account for new information; and (3) for every annual update, additional experts are recruited who can also contribute scores for past years. As a general rule, scholars, policymakers, and other interested parties should use the most recent data for information and analysis.
+
+```{r v13 and v14 comparison, include = FALSE}
+
+vdem_subset_v13 <- vdem_full_v13 %>%
+  drop_na(v2xca_academ) %>%
+  dplyr::select(country_name, year, v2xca_academ) %>%
+  filter(year != 2023) %>%
+  mutate(country_name_year = str_c(country_name, year, sep = "_"))
+
+
+vdem_subset_v14 <- vdem_full_v14_cy %>%
+  drop_na(v2xca_academ) %>%
+  dplyr::select(country_name, year, v2xca_academ) %>%
+  filter(year != 2023) %>%
+  mutate(country_name_year = str_c(country_name, year, sep = "_"))
+
+df_new_coverage <- setdiff(vdem_subset_v14$country_name_year, vdem_subset_v13$country_name_year)
+df_new_coverage <- as.data.frame(df_new_coverage)
+
+df_new_coverage %<>%
+  mutate(country_name = stringr::str_split(df_new_coverage, pattern = "_"))
+
+df_new_coverage$country_name <- sapply(df_new_coverage$country_name,"[[",1)
+
+unique(df_new_coverage$country_name)
+
+df_new_coverage <- setdiff(vdem_subset_v13$country_name_year, vdem_subset_v14$country_name_year)
+
+df_new_coverage <- as.data.frame(df_new_coverage)
+
+df_new_coverage %<>%
+  mutate(country_name = stringr::str_split(df_new_coverage, pattern = "_"))
+
+df_new_coverage$country_name <- sapply(df_new_coverage$country_name,"[[",1)
+
+unique(df_new_coverage$country_name)
+
+'
+for(k in df_new_coverage$country_name) {
+  
+vdem_fig_data <- vdem_full_v14_cy %>%
+    dplyr::select(country_name, country_id, year, v2xca_academ, v2xca_academ_codelow,    v2xca_academ_codehigh)%>%
+    filter(year %in% c(1900:2023)) %>%
+    filter(country_name == k) 
+  
+f1 <- ggplot(vdem_fig_data , aes(x =year, y = v2xca_academ)) +
+    geom_line(size =1.05) +
+    geom_ribbon(aes(ymin=v2xca_academ_codelow, ymax=v2xca_academ_codehigh), alpha = 0.3)+
+    theme_pubclean() +
+    scale_colour_manual(values = afi_color_main) +
+    scale_y_continuous(limits = c(0,1)) +
+    labs(y = "",
+         color = "", x = "",
+         size = "",
+         fill = "",
+         linetype = "",
+         shape = "",
+         title = k,
+         subtitle = "",
+         caption = "")
+
+ggsave(plot = f1, paste0("figs/country_missing/",k,"_AFI.png"), height = 14, width = 20, unit = "cm")
+
+}'
+
+```
+
+Version 14 of the AFI benefitted from `r toString(scales::label_comma(accuracy = NULL)(no_coders_v14-no_coders_v13))` more contributing coders than version 13, bringing the total to `r toString(scales::label_comma(accuracy = NULL)(no_coders_v14))` coders.
+
+### Expert Call and AFI Applications
+
+To continually improve the dataset, we call on scholars with country-specific knowledge and thematic expertise to contribute to the collaborative AFI coding. Apply to become a new coder by filling out the expert call [**here**](https://forms.office.com/pages/responsepage.aspx?id=ZUjeHQMjPUqYF45I1pke6l9sYBByn6pLvlXYVRPuQapUOFJCSEhOM1hGVzhORUw3WEpPWlFMTFFaQS4u).
+
+We also call on higher education policymakers, university leaders, and research funders to promote academic freedom in their own academic institutions as well as abroad. The Global Public Policy Institute and Scholars at Risk have published policy recommendations for how to use the *Academic Freedom Index* data for this purpose [@kinzelbach_free_2020].
+
+## About
+
+The views and opinions expressed in this report are those of the authors and do not reflect any official position of the Friedrich-Alexander-Universität Erlangen-Nürnberg, the V-Dem Project, or the V-Dem Steering Committee.
+
+**Authors**: Katrin Kinzelbach, Staffan I. Lindberg, Lars Lott
+
+**Code contribution**: Kelly Morrison, Yuko Sato, Lars Lott
+
+**Copy editor**: Jonathan Grayson
+
+**Cover design**: Soapbox and FAU (Ursula Auer)
+
+**Suggested citation**: Katrin Kinzelbach, Staffan I. Lindberg, Lars Lott. 2024. Academic Freedom Index 2024 Update. FAU Erlangen-Nürnberg and V-Dem Institute. DOI: [10.25593/open-fau-405](https://doi.org/10.25593/open-fau-405)
+
+**Funders**: We gratefully acknowledge funding from the Volkswagen Foundation (grant no. 9B286) as well as co-funding for the V-Dem infrastructure from the University of Gothenburg.
+
+{{< pagebreak >}}
+
+## Bibliography
